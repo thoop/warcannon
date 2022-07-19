@@ -279,7 +279,7 @@ const resultsPath = `${os.homedir()}/.warcannon/`;
 
 			ensurePathExists(resultsPath);
 
-			resultFile = path.join(resultsPath, 'testResults.json');
+			resultFile = path.join(resultsPath, 'localResults.json');
 
 			!fs.existsSync(resultFile) || fs.unlinkSync(resultFile);
 

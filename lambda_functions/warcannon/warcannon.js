@@ -60,7 +60,9 @@ class WARCannon {
 
 		this.sqs = new aws.SQS({ region });
 		this.queue = new queue(this.parallelism, Infinity, { onEmpty: () => this.queueEmpty() });
-		this.metrics = { regex_hits: {}, total_hits: 0 };
+		this.matches = [];
+		this.totalHits = 0;
+		this.totalMatchDataLength = 0;
 		this.messages = {};
 		this.progress = {};
 
@@ -180,7 +182,7 @@ class WARCannon {
 			},
 			progress: this.progress,
 			state: this.state,
-			totalHits: this.metrics.total_hits,
+			totalHits: this.totalHits,
 			completedWarcCount: this.completedWarcCount,
 			partialWarcCount: this.completedWarcCount + (partialWarcCount / 100),
 			runtime: Math.round((new Date() - this.startTime) / 1000),
@@ -189,6 +191,15 @@ class WARCannon {
 		}
 
 		if (status.warcListLength > 0) {
+			if (this.totalMatchDataLength > (250 * 1024 * 1024)) {
+				console.log(`[+] Results is [ ${this.totalMatchDataLength / (1024 * 1024).toFixed(3)} ] MiB. Saving to s3 before rotating key.`);
+
+				await this.uploadResults(true);
+
+				this.matches = [];
+				this.totalMatchDataLength = 0;
+			}
+
 			this.statusReport = setTimeout(() => this.sendStatusReport(), 10000);
 		} else {
 			console.log(`[+] Queue is empty. Work is done.`);
@@ -221,35 +232,13 @@ class WARCannon {
 			return Promise.resolve(false);
 		}
 
-		this.results_key ??= this.generateResultKey();
-
-		const results = JSON.stringify(this.metrics);
-
-		const key = this.results_key.toString();
-		if (results.length > (250 * 1024 * 1024)) {
-			console.log(`[+] Results is [ ${results.length / (1024 * 1024).toFixed(3)} ] MiB. Saving to ${this.results_key}. Before rotating key.`);
-			await s3.putObject({
-				Bucket: this.settings.results_bucket,
-				Key: this.results_key,
-				Body: results,
-				ContentType: "application/json"
-			}).promise();
-
-			this.metrics = { regex_hits: {}, total_hits: 0 };
-			this.results_key = this.generateResultKey();
-
-			console.log(`[*] Key rotated to ${this.results_key}`);
-
-			return Promise.resolve();
-		}
-
 		console.log(`[*] Saving results.`);
 		this.lastUpload = new Date();
 
 		return s3.putObject({
 			Bucket: this.settings.results_bucket,
-			Key: this.results_key,
-			Body: results,
+			Key: this.generateResultKey(),
+			Body: this.matches.join(),
 			ContentType: "application/json"
 		}).promise();
 	}
@@ -286,36 +275,19 @@ class WARCannon {
 								this.progress[warc] = Math.round(message.recordcount / 15) / 100;
 							break;
 
+							case "match":
+								let matchData = message.message;
+								let metchDataCSV = `${matchData.regexName},${matchData.value},${matchData.uri},${matchData.domain}\n`;
+
+								this.matches.push(metchDataCSV);
+								this.totalHits++;
+
+								let dataLength = metchDataCSV.length;
+								this.totalMatchDataLength += dataLength;
+							break;
+
 							case "done":
-								message = message.message;
-								
-								this.metrics.total_hits ??= 0;
-								this.metrics.regex_hits ??= {};
-
-								this.metrics.total_hits += message.total_hits
-
-								Object.keys(message.regex_hits).map((e) => {
-									this.metrics.regex_hits[e] ??= {};
-
-									let metric = this.metrics.regex_hits[e];
-									let matches = message.regex_hits[e];
-
-									// Concatenate unique URI results, up to 3 per unique result+domain combination.
-									Object.keys(matches).map(hash => {
-										metric[hash] ??= { value: matches[hash].value };
-										Object.keys(matches[hash])
-											.filter(x => x !== "value")
-											.map(domain => {
-												metric[hash][domain] ??= [];
-
-												if (metric[hash][domain].length < 3) {
-													metric[hash][domain] = metric[hash][domain]
-														.concat(matches[hash][domain].filter(uri => !metric[hash][domain].includes(uri)))
-														.splice(0, 3);
-												}
-											});
-									});
-								});
+								console.log(`[*] Done Parsing Regexes`);
 							break;
 
 							default:
@@ -345,7 +317,7 @@ class WARCannon {
 						return success();
 					})
 			} catch (e) {
-				console.log(e);
+				console.log('e:', e);
 
 				try {
 					delete this.progress[warc];

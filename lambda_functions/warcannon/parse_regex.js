@@ -20,6 +20,8 @@ const s3 = new aws.S3({ region: "us-east-1" });
 const isLocal = !!process.env?.WARCANNON_IS_LOCAL;
 
 let resultsPath = false;
+let fileName = false;
+let stream = false;
 
 exports.main = function(parser) {
 
@@ -31,12 +33,14 @@ exports.main = function(parser) {
 	if (isLocal) {
 		console.log('[*] parse_regex.js: Running in test mode.');
 		resultsPath = `${os.homedir()}/.warcannon/`;
+		fileName = 'localResults.json';
+		stream = fs.createWriteStream(resultsPath+fileName, {flags:'a'});
 	}
 
 	const parseStartTime = hrtime();
 
 	return new Promise((success, failure) => {
-		process.send = (typeof process.send == "function") ? process.send : console.log;
+		process.send = (typeof process.send == "function") ? process.send : function() {};
 
 		const metrics = {
 			total_hits: 0,
@@ -90,7 +94,13 @@ exports.main = function(parser) {
 
 			if (new Date() - last_status_report > 1000) {
 				last_status_report = new Date();
-				process.send({type: "progress", recordcount: records, recordsprocessed: records_processed});
+				let event = {type: "progress", recordcount: records, recordsprocessed: records_processed};
+
+				if (isLocal) {
+					console.log(event);
+				}
+
+				process.send(event);
 			}
 
 			records++;
@@ -139,16 +149,18 @@ exports.main = function(parser) {
 
 					metrics.total_hits++;
 					value = value.trim().replace(/['"]+/g, "");
-					const key = hash(value);
 
-					metrics.regex_hits[e][key] ??= { value };
-					metrics.regex_hits[e][key][domain] ??= [];
+					let matchData = {
+						regexName: e,
+						value: value,
+						uri: record.warcHeader['WARC-Target-URI'],
+						domain: domain
+					};
 
-					let uri = record.warcHeader['WARC-Target-URI'];
-					let uris = metrics.regex_hits[e][key][domain];
+					process.send({message: matchData, type: "match"});
 
-					if (uris.length < 3 && !uris.includes(uri)) {
-						uris.push(uri);
+					if (isLocal) {
+						stream.write(`${matchData.regexName},${matchData.value},${matchData.uri},${matchData.domain}\n`);
 					}
 
 				});
@@ -163,10 +175,11 @@ exports.main = function(parser) {
 		});
 
 		parser.on('end', function () {
-			
+
 			process.send({message: metrics, type: "done"});
 
 			if (isLocal) {
+				console.log(`finished with ${metrics.total_hits} hits`)
 				console.log(`\n\n[+] Parser finished. Saving results to [ ` + `${ resultsPath }localResults.json`.blue + ` ]\n`);
 				console.log("--- Performance statistics ---");
 				const record = roundAvg(recordCost.total, recordCost.count);
@@ -192,14 +205,14 @@ exports.main = function(parser) {
 				}
 
 				console.log(`${Math.round(total_mem / 1024 / 1024 * 100) / 100} MB`);
-				fs.writeFileSync(`${resultsPath}localResults.json`, JSON.stringify(metrics));
+				stream.end();
 			}
 
 			success(metrics);
 		});
 
 		parser.on('error', (err) => {
-			console.log(err);
+			console.log('err:', err);
 		});
 	});
 }
