@@ -158,7 +158,7 @@ class WARCannon {
 	}
 
 	generateResultKey() {
-		return `${this.instanceId}_${new Date().toISOString()}.json`;
+		return `${this.instanceId}_${new Date().toISOString()}.csv`;
 	}
 
 	async queueEmpty() {
@@ -191,13 +191,10 @@ class WARCannon {
 		}
 
 		if (status.warcListLength > 0) {
-			if (this.totalMatchDataLength > (250 * 1024 * 1024)) {
+			if (this.totalMatchDataLength > (25 * 1024 * 1024)) {
 				console.log(`[+] Results is [ ${this.totalMatchDataLength / (1024 * 1024).toFixed(3)} ] MiB. Saving to s3 before rotating key.`);
 
 				await this.uploadResults(true);
-
-				this.matches = [];
-				this.totalMatchDataLength = 0;
 			}
 
 			this.statusReport = setTimeout(() => this.sendStatusReport(), 10000);
@@ -232,15 +229,24 @@ class WARCannon {
 			return Promise.resolve(false);
 		}
 
+		if (this.matches.length == 0) {
+			return Promise.resolve();
+		}
+
 		console.log(`[*] Saving results.`);
 		this.lastUpload = new Date();
 
-		return s3.putObject({
+		await s3.putObject({
 			Bucket: this.settings.results_bucket,
 			Key: this.generateResultKey(),
-			Body: this.matches.join(),
-			ContentType: "application/json"
+			Body: this.matches.join(''),
+			ContentType: "text/csv"
 		}).promise();
+
+		this.matches = [];
+		this.totalMatchDataLength = 0;
+
+		return Promise.resolve();
 	}
 
 	async processWarc(warc, ReceiptHandle) {
